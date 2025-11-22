@@ -1,0 +1,175 @@
+---
+title: "Исследование метаданных DNS трафика"
+subtitle: "Практическая #4"
+author: "Mary"
+format: 
+  md:
+    output-file: README.md
+---
+
+## Цель работы
+
+1.  Закрепить практические навыки использования языка программирования R для обработки данных
+2.  Закрепить знания основных функций обработки данных экосистемы tidyverse языка R
+3.  Закрепить навыки исследования метаданных DNS трафика
+
+## Исходные данные
+
+1.  Программное обеспечение Windows 10 Pro
+2.  Visual Studio Code с установленными плагинами для работы с языком R
+3.  Интерпретатор языка R 4.5.2
+
+## План
+
+1.  Импортировать данные DNS
+2.  Добавить пропущенные данные о структуре данных (назначении столбцов)
+3.  Преобразовать данные в столбцах в нужный формат
+4.  Просмотреть общую структуру данных с помощью функции glimpse()
+5.  Проанализировать данные
+
+## Шаги:
+
+1.  Добавьте пропущенные данные о структуре данных (назначении столбцов)
+
+    ```{r}
+    col_names <- c(
+      "ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p",
+      "proto", "trans_id", "rtt", "query", "qclass", "qclass_name",
+      "qtype", "qtype_name", "rcode", "rcode_name", "AA", "TC", "RD", "RA",
+      "Z", "answers", "TTLs", "rejected"
+    )
+    ```
+
+2.  Преобразуйте данные в столбцах в нужный формат
+
+    ```{r}
+    library(readr)
+    library(dplyr)
+    library(archive)
+
+    con <- archive_read("https://storage.yandexcloud.net/dataset.ctfsec/dns.zip", file = "dns.log", format = "zip")
+    dns <- read_tsv(file = con, col_names = col_names, na = c("-", "(empty)"), comment = "#")
+    dns <- dns %>%
+      mutate(ts = as.POSIXct(ts, origin = "1970-01-01", tz = "UTC"))
+
+
+    ```
+
+3.  Просмотрите общую структуру данных с помощью функции glimpse()
+
+    ```{r}
+    library(tibble)
+
+    dns <- dns %>% mutate(ts = as.POSIXct(ts, origin = "1970-01-01", tz = "UTC"))
+
+    glimpse(dns)
+    ```
+
+4.  Сколько участников информационного обмена в сети Доброй Организации?
+
+    ```{r}
+    is_internal_ip <- function(ip) {
+      grepl("^10\\.|^192\\.168\\.|^172\\.(1[6-9]|2[0-9]|3[01])\\.", ip)
+    }
+
+    all_ips <- unique(c(dns$`id.orig_h`, dns$`id.resp_h`))
+
+    internal_participants <- all_ips[is_internal_ip(all_ips)]
+
+    num_internal_participants <- length(internal_participants)
+    num_internal_participants
+    ```
+
+5.  Какое соотношение участников обмена внутри сети и участников обращений к внешним ресурсам?
+
+    ```{r}
+    dns <- dns %>%
+      mutate(
+        orig_internal = is_internal_ip(`id.orig_h`),
+        resp_internal = is_internal_ip(`id.resp_h`)
+      )
+
+    internal_to_internal <- dns %>% filter(orig_internal & resp_internal)
+
+    internal_to_external <- dns %>% filter(orig_internal & !resp_internal)
+
+    ratio <- nrow(internal_to_internal) / nrow(internal_to_external)
+    round(ratio, 3)
+    ```
+
+6.  Найдите топ-10 участников сети, проявляющих наибольшую сетевую активность
+
+    ```{r}
+    top_active_users <- dns %>%
+      filter(orig_internal) %>%
+      count(`id.orig_h`, sort = TRUE) %>%
+      head(10)
+
+    top_active_users
+    ```
+
+7.  Найдите топ-10 доменов, к которым обращаются пользователи сети и соответственное количество обращений (?)
+
+    ```{r}
+    top_domains <- dns %>%
+      filter(!is.na(query)) %>%
+      count(query, sort = TRUE) %>%
+      head(10)
+
+    top_domains
+    ```
+
+8.  Опеределите базовые статистические характеристики (функция summary()) интервала времени между последовательными обращениями к топ-10 доменам
+
+    ```{r}
+    library(lubridate)
+
+    top10_list <- top_domains$query
+
+    intervals_data <- dns %>%
+      filter(query %in% top10_list) %>%
+      arrange(query, ts) %>%
+      group_by(query) %>%
+      mutate(delta_sec = as.numeric(difftime(ts, lag(ts), units = "secs"))) %>%
+      ungroup() %>%
+      filter(!is.na(delta_sec))
+
+    summary(intervals_data$delta_sec)
+    ```
+
+9.  Поиск признаков скрытого DNS-канала (периодические запросы)
+
+    ```{r}
+    periodic_check <- dns %>%
+      filter(orig_internal, !is.na(query)) %>%
+      select(`id.orig_h`, query, ts) %>%
+      arrange(`id.orig_h`, query, ts) %>%
+      group_by(`id.orig_h`, query) %>%
+      mutate(
+        delta = as.numeric(difftime(ts, lag(ts), units = "secs")),
+        n = n()
+      ) %>%
+      filter(n >= 5) %>%
+      summarise(
+        mean_delta = mean(delta, na.rm = TRUE),
+        sd_delta = sd(delta, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(cv = sd_delta / mean_delta) %>%
+      filter(cv < 0.1 & mean_delta > 10)
+
+    if (nrow(periodic_check) > 0) {
+      cat("Обнаружены подозрительные IP с периодическими запросами:\n")
+      print(unique(periodic_check$`id.orig_h`))
+    } else {
+      cat("Подозрительных периодических DNS-запросов не обнаружено.\n")
+    }
+    ```
+
+## Оценка результата
+
+В результате лабораторной работы мы развили практические навыки использования языка программирования R для обработки данных и закрепили знания базовых типов данных языка R
+
+## Вывод
+
+Таким образом, мы научились, используя программный пакет dplyr, анализировать DNS-логи с помощью языка программирования R
