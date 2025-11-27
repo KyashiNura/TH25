@@ -1,0 +1,151 @@
+---
+title: "Исследование вредоносной активности в домене Windows"
+subtitle: "Практическая #6"
+author: "Mary"
+format: 
+  md:
+    output-file: README.md
+---
+
+## Цель работы
+1. Закрепить навыки исследования данных журнала Windows Active Directory
+2. Изучить структуру журнала системы Windows Active Directory
+3. Закрепить практические навыки использования языка программирования R для
+обработки данных
+4. Закрепить знания основных функций обработки данных экосистемы tidyverse
+языка R
+
+
+## Исходные данные
+
+1. Программное обеспечение Windows 11 Pro
+2. Visual Studio Code с установленными плагинами для работы с языком R
+3. Интерпретатор языка R 4.5.2
+    
+       
+ 
+## План
+
+1. Распаковать архив и загрузить исходный JSON-файл с логами.
+2. Проверить структуру данных и определить вложенные поля.
+3. Раскрыть вложенные датафреймы с помощью unnest_wider, сохранив имена колонок.
+4. Удалить неинформативные колонки, содержащие только одно уникальное значение.
+5. Подсчитать количество уникальных хостов в датасете.
+6. Загрузить таблицу Windows Event_ID и привести типы данных к корректным.
+7. Объединить данные или использовать справочник для интерпретации событий.
+8. Определить число событий с высоким и средним уровнем значимости.
+
+
+
+## Шаги:   
+
+0. Импорт библиотек
+    ```{r}
+    library(rvest)
+    library(tidyverse)
+    library(lubridate)
+    options(stringsAsFactors = FALSE)
+    ```
+
+
+1. Импорт данных
+
+    ```{r}
+    file_path <- "dataset.tar.gz"
+
+    untar(file_path, exdir = "data")
+    json_file <- list.files("data", pattern = ".json", full.names = TRUE)
+
+    siem_data <- jsonlite::stream_in(file(json_file))
+    ```
+
+
+2. Подготовка справочника событий Windows
+
+    ```{r}
+    webpage <- xml2::read_html("https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/appendix-l--events-to-monitor")
+    event_df <- rvest::html_table(webpage)[[1]]
+
+    glimpse(event_df)
+    ```
+
+
+3. Предварительный просмотр данных
+
+    ```{r}
+    glimpse(siem_data)
+    ```
+
+
+4. Раскрытие вложенных списков
+
+    ```{r}
+    siem_data_clean <- siem_data %>%
+    unnest_wider(winlog, names_sep = "_") %>%
+    unnest_wider(event, names_sep = "_") %>%
+    unnest_wider(agent, names_sep = "_") %>%
+    unnest_wider(host, names_sep = "_") %>%
+    unnest_wider(log, names_sep = "_")
+
+    glimpse(siem_data_clean)
+    ```
+
+5. Минимизация колонок
+
+    ```{r}
+    siem_data_clean <- siem_data_clean %>% select(where(~n_distinct(.) > 1))
+    glimpse(siem_data_clean)
+    ```
+
+6. Приведение типов столбцов
+
+    ```{r}
+    siem_data_clean <- siem_data_clean %>%
+    mutate(
+      `@timestamp` = ymd_hms(`@timestamp`),
+      event_code = as.integer(event_code),
+      winlog_event_id = as.integer(winlog_event_id),
+    )
+    ```
+
+7. Количество хостов
+
+    ```{r}
+    host_count <- siem_data_clean %>% summarize(hosts = n_distinct(winlog_computer_name))
+    glimpse(host_count)
+    ```
+
+8. Подготовка датафрейма с расшифровкой Windows Event_ID
+
+    ```{r}
+    windows_event_df <- event_df %>%
+    filter(grepl("^[-+]?\\d+$", `Current Windows Event ID`)) %>%
+    rename(winlog_event_id = `Current Windows Event ID`, description = `Event Summary`) %>%
+    mutate(winlog_event_id = as.integer(winlog_event_id),
+    description = as.character(description))
+    head(windows_event_df)
+    ```
+
+9. События с высоким и средним уровнем значимости
+
+```{r}
+warn_events <- siem_data_clean %>%
+filter(log_level %in% c("warning")) #little bad
+error_events <- siem_data_clean %>%
+filter(log_level %in% c("error")) #very bad
+error_count <- nrow(error_events)
+warn_count <- nrow(warn_events)
+
+sprintf("1. Количество событий высокого уровня значимости: %d", error_count)
+sprintf("2. Количество событий среднего уровня значимости: %d", warn_count)
+sprintf("Всего: %d", error_count+warn_count)          
+```
+
+## Оценка результата
+
+В результате лабораторной работы мы научились анализировать дампы событий ОС Windows
+
+
+## Вывод
+
+Таким образом, мы научились работать с определенными функциями и библиотеками языка R для анализа дампов событий ОС Windows
